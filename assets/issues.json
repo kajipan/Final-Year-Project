@@ -1,0 +1,302 @@
+{
+  "battery": {
+    "questions": [
+      {"id": "batt_wont_start", "text": "Does the bike fail to start at all (no crank, no light)?"},
+      {"id": "batt_dim_light", "text": "Are the headlight/indicators dim or flickering?"},
+      {"id": "batt_old", "text": "Is the battery older than 2 years?"},
+      {"id": "batt_corrosion", "text": "Do you see white/greenish crust on the battery terminals?"},
+      {"id": "batt_recent_jump", "text": "Did it start fine after a jump-start or push-start?"}
+    ],
+    "causes": [
+      {
+        "id": "batt_dead",
+        "name": "Dead/discharged battery",
+        "symptom_tags": ["batt_wont_start", "batt_recent_jump"],
+        "body_types": ["scooter", "commuter_standard", "sports_commuter"],
+        "severity": "low",
+        "diy_possible": true,
+        "diy_note": "Try a jump-start or push-start. If it works, the battery is likely just discharged, not damaged.",
+        "mechanic_specialty": "electrical",
+        "avg_cost_lkr": "0 (recharge) - 6000 (replacement)"
+      },
+      {
+        "id": "batt_terminal_corrosion",
+        "name": "Corroded battery terminals",
+        "symptom_tags": ["batt_dim_light", "batt_corrosion"],
+        "body_types": ["scooter", "commuter_standard", "sports_commuter"],
+        "severity": "low",
+        "diy_possible": false,
+        "diy_note": "Corrosion can be cleaned, but disconnecting/reconnecting terminals safely needs basic know-how — recommend a mechanic for a first-timer.",
+        "mechanic_specialty": "electrical",
+        "avg_cost_lkr": "500 - 1500"
+      },
+      {
+        "id": "batt_end_of_life",
+        "name": "Battery at end of life",
+        "symptom_tags": ["batt_old", "batt_dim_light", "batt_wont_start"],
+        "body_types": ["scooter", "commuter_standard", "sports_commuter"],
+        "severity": "medium",
+        "diy_possible": false,
+        "mechanic_specialty": "electrical",
+        "avg_cost_lkr": "3500 - 7000"
+      }
+    ]
+  },
+  "tire": {
+    "questions": [
+      {"id": "tire_flat", "text": "Is a tire visibly flat or very soft?"},
+      {"id": "tire_wobble", "text": "Does the bike feel unstable or wobble at speed?"},
+      {"id": "tire_worn", "text": "Is the tread visibly worn smooth or bald?"},
+      {"id": "tire_puncture_visible", "text": "Can you see a nail, glass, or object stuck in the tire?"}
+    ],
+    "causes": [
+      {
+        "id": "tire_puncture",
+        "name": "Puncture",
+        "symptom_tags": ["tire_flat", "tire_puncture_visible"],
+        "body_types": ["scooter", "commuter_standard", "sports_commuter"],
+        "severity": "medium",
+        "diy_possible": false,
+        "mechanic_specialty": "tire_wheel",
+        "avg_cost_lkr": "300 - 800"
+      },
+      {
+        "id": "tire_worn_out",
+        "name": "Worn-out tire needing replacement",
+        "symptom_tags": ["tire_worn", "tire_wobble"],
+        "body_types": ["scooter", "commuter_standard", "sports_commuter"],
+        "severity": "medium",
+        "diy_possible": false,
+        "mechanic_specialty": "tire_wheel",
+        "avg_cost_lkr": "3000 - 9000"
+      },
+      {
+        "id": "tire_underinflated",
+        "name": "Underinflated tire",
+        "symptom_tags": ["tire_flat", "tire_wobble"],
+        "body_types": ["scooter", "commuter_standard", "sports_commuter"],
+        "severity": "low",
+        "diy_possible": true,
+        "diy_note": "Check tire pressure against the recommended PSI on the bike's manual/frame sticker and top up at any fuel station air pump.",
+        "mechanic_specialty": "tire_wheel",
+        "avg_cost_lkr": "0 - 100"
+      }
+    ]
+  },
+  "engine": {
+    "questions": [
+      {"id": "eng_wont_start", "text": "Does the engine fail to start even after several tries?"},
+      {"id": "eng_stalls", "text": "Does the engine start but stall while riding?"},
+      {"id": "eng_rough_idle", "text": "Is the idle rough or does the engine shake at a stop?"},
+      {"id": "eng_smoke", "text": "Is there visible smoke from the exhaust?"},
+      {"id": "eng_power_loss", "text": "Has acceleration power noticeably dropped?"}
+    ],
+    "causes": [
+      {
+        "id": "eng_fuel_issue",
+        "name": "Fuel delivery problem (empty tank, bad fuel, clogged filter)",
+        "symptom_tags": ["eng_wont_start", "eng_stalls", "eng_power_loss"],
+        "body_types": ["scooter", "commuter_standard", "sports_commuter"],
+        "severity": "medium",
+        "diy_possible": true,
+        "diy_note": "First check fuel level. If fuel is present but old (bike unused for weeks/months), stale fuel is a common cause — a mechanic can drain/flush it.",
+        "mechanic_specialty": "engine",
+        "avg_cost_lkr": "500 - 2500"
+      },
+      {
+        "id": "eng_spark_plug",
+        "name": "Faulty or fouled spark plug",
+        "symptom_tags": ["eng_wont_start", "eng_rough_idle"],
+        "body_types": ["commuter_standard", "sports_commuter"],
+        "severity": "low",
+        "diy_possible": false,
+        "mechanic_specialty": "engine",
+        "avg_cost_lkr": "300 - 800"
+      },
+      {
+        "id": "eng_serious_internal",
+        "name": "Internal engine issue (piston, valve, or major wear)",
+        "symptom_tags": ["eng_smoke", "eng_power_loss", "eng_rough_idle"],
+        "body_types": ["scooter", "commuter_standard", "sports_commuter"],
+        "severity": "high",
+        "diy_possible": false,
+        "mechanic_specialty": "engine",
+        "avg_cost_lkr": "5000+ (needs inspection for accurate quote)"
+      }
+    ]
+  },
+  "overheating": {
+    "questions": [
+      {"id": "heat_after_long_ride", "text": "Did it happen after a long ride or in heavy traffic?"},
+      {"id": "heat_coolant_low", "text": "Is the coolant level low (liquid-cooled bikes only)?"},
+      {"id": "heat_smell", "text": "Is there a burning smell?"},
+      {"id": "heat_power_loss", "text": "Does the bike lose power or feel sluggish when hot?"}
+    ],
+    "causes": [
+      {
+        "id": "heat_normal_load",
+        "name": "Normal heat build-up from traffic/heat conditions",
+        "symptom_tags": ["heat_after_long_ride"],
+        "body_types": ["scooter", "commuter_standard", "sports_commuter"],
+        "severity": "low",
+        "diy_possible": true,
+        "diy_note": "Let the bike idle/rest in shade for 10-15 minutes. If it returns to normal, it was likely just heat load, not a fault.",
+        "mechanic_specialty": "engine",
+        "avg_cost_lkr": "0"
+      },
+      {
+        "id": "heat_coolant_leak",
+        "name": "Low coolant / possible leak (liquid-cooled models)",
+        "symptom_tags": ["heat_coolant_low", "heat_smell"],
+        "body_types": ["sports_commuter"],
+        "severity": "high",
+        "diy_possible": false,
+        "mechanic_specialty": "engine",
+        "avg_cost_lkr": "1000 - 4000",
+        "safety_note": "Stop riding — continuing on low coolant can cause serious engine damage."
+      },
+      {
+        "id": "heat_oil_issue",
+        "name": "Low or degraded engine oil",
+        "symptom_tags": ["heat_power_loss", "heat_smell"],
+        "body_types": ["scooter", "commuter_standard", "sports_commuter"],
+        "severity": "medium",
+        "diy_possible": false,
+        "mechanic_specialty": "engine",
+        "avg_cost_lkr": "800 - 1800"
+      }
+    ]
+  },
+  "brake": {
+    "questions": [
+      {"id": "brake_squeal", "text": "Does braking produce a squealing or grinding noise?"},
+      {"id": "brake_soft", "text": "Does the brake lever/pedal feel soft or go too far down?"},
+      {"id": "brake_pulls", "text": "Does the bike pull to one side when braking?"},
+      {"id": "brake_weak", "text": "Does it take longer than usual to stop?"}
+    ],
+    "causes": [
+      {
+        "id": "brake_worn_pads",
+        "name": "Worn brake pads",
+        "symptom_tags": ["brake_squeal", "brake_weak"],
+        "body_types": ["scooter", "commuter_standard", "sports_commuter"],
+        "severity": "high",
+        "diy_possible": false,
+        "mechanic_specialty": "brake",
+        "avg_cost_lkr": "800 - 2500",
+        "safety_note": "Do not delay — worn brakes are a safety risk."
+      },
+      {
+        "id": "brake_fluid_low",
+        "name": "Low brake fluid or air in the line (disc brakes)",
+        "symptom_tags": ["brake_soft"],
+        "body_types": ["sports_commuter"],
+        "severity": "high",
+        "diy_possible": false,
+        "mechanic_specialty": "brake",
+        "avg_cost_lkr": "1000 - 3000",
+        "safety_note": "Avoid riding until checked — soft brakes are a serious safety risk."
+      },
+      {
+        "id": "brake_misaligned",
+        "name": "Misaligned caliper or uneven pad wear",
+        "symptom_tags": ["brake_pulls", "brake_squeal"],
+        "body_types": ["scooter", "commuter_standard", "sports_commuter"],
+        "severity": "medium",
+        "diy_possible": false,
+        "mechanic_specialty": "brake",
+        "avg_cost_lkr": "500 - 1500"
+      }
+    ]
+  },
+  "strange_noise": {
+    "questions": [
+      {"id": "noise_clicking", "text": "Is it a clicking/ticking sound that changes with engine speed?"},
+      {"id": "noise_grinding", "text": "Is it a grinding/scraping sound, especially when moving?"},
+      {"id": "noise_rattling", "text": "Is it a loose rattling sound over bumps?"},
+      {"id": "noise_squealing", "text": "Is it a high-pitched squeal (not while braking)?"}
+    ],
+    "causes": [
+      {
+        "id": "noise_chain",
+        "name": "Loose or dry chain (chain-drive bikes)",
+        "symptom_tags": ["noise_clicking", "noise_rattling"],
+        "body_types": ["commuter_standard", "sports_commuter"],
+        "severity": "medium",
+        "diy_possible": true,
+        "diy_note": "Check chain slack and lubricate if dry. If still loose after lubrication, needs mechanic adjustment.",
+        "mechanic_specialty": "engine",
+        "avg_cost_lkr": "200 - 600"
+      },
+      {
+        "id": "noise_loose_panel",
+        "name": "Loose body panel or fastener",
+        "symptom_tags": ["noise_rattling"],
+        "body_types": ["scooter", "commuter_standard", "sports_commuter"],
+        "severity": "low",
+        "diy_possible": true,
+        "diy_note": "Check for visibly loose panels/mudguards and hand-tighten if you can identify the source safely.",
+        "mechanic_specialty": "other",
+        "avg_cost_lkr": "0 - 300"
+      },
+      {
+        "id": "noise_belt_cvt",
+        "name": "Worn CVT belt or pulley (scooter-specific)",
+        "symptom_tags": ["noise_squealing", "noise_grinding"],
+        "body_types": ["scooter"],
+        "severity": "medium",
+        "diy_possible": false,
+        "mechanic_specialty": "engine",
+        "avg_cost_lkr": "2500 - 6000"
+      }
+    ]
+  },
+  "electrical": {
+    "questions": [
+      {"id": "elec_lights_out", "text": "Are the headlight/taillight/indicators not working?"},
+      {"id": "elec_horn_out", "text": "Is the horn not working?"},
+      {"id": "elec_intermittent", "text": "Do the electrical issues come and go, especially over bumps?"},
+      {"id": "elec_burning_smell", "text": "Is there a burning smell or visible melted wiring?"}
+    ],
+    "causes": [
+      {
+        "id": "elec_blown_fuse",
+        "name": "Blown fuse",
+        "symptom_tags": ["elec_lights_out", "elec_horn_out"],
+        "body_types": ["scooter", "commuter_standard", "sports_commuter"],
+        "severity": "low",
+        "diy_possible": true,
+        "diy_note": "Check the fuse box (usually near the battery) for a visibly broken fuse and replace with the same amp rating.",
+        "mechanic_specialty": "electrical",
+        "avg_cost_lkr": "50 - 200"
+      },
+      {
+        "id": "elec_loose_wiring",
+        "name": "Loose or corroded wiring connection",
+        "symptom_tags": ["elec_intermittent"],
+        "body_types": ["scooter", "commuter_standard", "sports_commuter"],
+        "severity": "medium",
+        "diy_possible": false,
+        "mechanic_specialty": "electrical",
+        "avg_cost_lkr": "500 - 2000"
+      },
+      {
+        "id": "elec_wiring_damage",
+        "name": "Damaged/burnt wiring harness",
+        "symptom_tags": ["elec_burning_smell"],
+        "body_types": ["scooter", "commuter_standard", "sports_commuter"],
+        "severity": "high",
+        "diy_possible": false,
+        "mechanic_specialty": "electrical",
+        "avg_cost_lkr": "1500 - 5000",
+        "safety_note": "Stop riding immediately — burning smell/melted wiring is a fire risk."
+      }
+    ]
+  },
+  "other": {
+    "questions": [
+      {"id": "other_desc", "text": "Please describe the issue in your own words."}
+    ],
+    "causes": []
+  }
+}

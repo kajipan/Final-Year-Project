@@ -1,8 +1,17 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'dart:convert';
+import 'package:stomp_dart_client/stomp.dart';
+import 'package:stomp_dart_client/stomp_config.dart';
+import 'package:stomp_dart_client/stomp_frame.dart';
+import 'translations.dart';
+import 'dart:async';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:stomp_dart_client/stomp.dart';
+import 'screens/ai_chat_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -74,6 +83,7 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   String _selectedRole = 'user';
+  String _selectedLanguage = 'en'; 
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
@@ -143,6 +153,30 @@ class _LoginScreenState extends State<LoginScreen> {
                   ],
                 ),
                 const SizedBox(height: 20),
+                // Language Selector
+                Row(
+                  children: [
+                    const Text('Language: ', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: DropdownButton<String>(
+                        value: _selectedLanguage,
+                        isExpanded: true,
+                        items: const [
+                          DropdownMenuItem(value: 'en', child: Text('English')),
+                          DropdownMenuItem(value: 'ta', child: Text('தமிழ்')),
+                          DropdownMenuItem(value: 'si', child: Text('සිංහල')),
+                        ],
+                        onChanged: (value) {
+                          setState(() {
+                            _selectedLanguage = value!;
+                          });
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
                 TextFormField(
                   controller: _emailController,
                   validator: (v) => v!.isEmpty ? 'Please enter email' : null,
@@ -188,15 +222,15 @@ class _LoginScreenState extends State<LoginScreen> {
                           final response = await http.post(
                             Uri.parse('http://10.0.2.2:8081/api/users/login'),
                             headers: {'Content-Type': 'application/json'},
-                            body: jsonEncode({'email': _emailController.text.trim(), 'password': _passwordController.text.trim()}),
+                            body: jsonEncode({'email': _emailController.text.trim(), 'password': _passwordController.text.trim(),'language': _selectedLanguage,}),
                           );
                           if (response.statusCode == 200) {
                             final user = jsonDecode(response.body);
                             if (!context.mounted) return;
                             Navigator.pushReplacement(context, MaterialPageRoute(
                               builder: (context) => _selectedRole == 'user'
-                                  ? UserHomeScreen(userName: user['name'], userEmail: user['email'])
-                                  : MechanicHomeScreen(mechanicName: user['name']),
+                                  ? UserHomeScreen(userName: user['name'], userEmail: user['email'], userId: user['id'], userLanguage: _selectedLanguage)
+                                  : MechanicHomeScreen(mechanicName: user['name'], mechanicId: user['id'], mechanicLanguage: _selectedLanguage),
                             ));
                           } else {
                             if (!context.mounted) return;
@@ -870,7 +904,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
 class UserHomeScreen extends StatefulWidget {
   final String userName;
   final String userEmail;
-  const UserHomeScreen({super.key, required this.userName, required this.userEmail});
+  final String userLanguage;
+  final int userId;
+  const UserHomeScreen({super.key, required this.userName, required this.userEmail, required this.userId, this.userLanguage = 'en',});
   @override
   State<UserHomeScreen> createState() => _UserHomeScreenState();
 }
@@ -885,6 +921,14 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
   GoogleMapController? _mapController;
   Set<Marker> _markers = {};
   Position? _currentPosition;
+  StompClient? _stompClient;
+  String _requestStatus = '';
+  String _mechanicStage = 'accepted'; // accepted -> arrived -> in_progress
+  int? _requestedMechanicId;
+  String _mechanicDistanceText = '';
+  String _requestedMechanicName = '';
+  String? _activeRequestId;
+  StreamSubscription<Position>? _locationSendSub;
 
   final List<String> _vehicleTypes = ['Car', 'Motorcycle', 'Tuk-Tuk', 'Van', 'Truck'];
   final Map<String, List<String>> _vehicleModels = {
@@ -911,6 +955,7 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
     super.initState();
     _fetchMechanics();
     _getCurrentLocation();
+    _connectWebSocket();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _showVehicleDialog();
     });
@@ -955,6 +1000,305 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
       ),
     );
   }
+   
+ 
+
+  void _connectWebSocket() {
+  _stompClient = StompClient(
+    config: StompConfig(
+      url: 'ws://10.0.2.2:8081/ws/websocket',
+      onConnect: (frame) {
+        _stompClient!.subscribe(
+          destination: '/topic/user/${widget.userId}',
+          callback: (frame) {
+            final data = jsonDecode(frame.body!);
+            if (data['type'] == 'REQUEST_CANCELLED') {
+              _locationSendSub?.cancel();
+              setState(() {
+                _requestSent = false;
+                _requestStatus = '';
+                _activeRequestId = null;
+                _requestedMechanicId = null;
+                _markers.removeWhere((m) => m.markerId.value == 'mechanic');
+              });
+              showDialog(
+                context: context,
+                builder: (context) => AlertDialog(
+                  title: const Text('❌ Request Cancelled'),
+                  content: Text('Mechanic cancelled the job.\nReason: ${data['reason']}'),
+                  actions: [
+                    ElevatedButton(
+                      onPressed: () => Navigator.pop(context),
+                      style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFFF6B00)),
+                      child: const Text('OK', style: TextStyle(color: Colors.white)),
+                    ),
+                  ],
+                ),
+              );
+              return;
+            }
+
+           if (data['type'] == 'MECHANIC_ARRIVED') {
+              setState(() => _mechanicStage = 'arrived');
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('🔧 Mechanic has reached your location!'),
+                  backgroundColor: Colors.blue,
+                  duration: Duration(seconds: 4),
+                ),
+              );
+              return;
+            }
+
+            if (data['type'] == 'WORK_STARTED') {
+              setState(() => _mechanicStage = 'in_progress');
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('⚙️ Mechanic has started the work!'),
+                  backgroundColor: Colors.deepOrange,
+                  duration: Duration(seconds: 4),
+                ),
+              );
+              return;
+            }
+
+            if (data['type'] == 'PAYMENT_CONFIRMED') {
+              return;
+            }
+
+            if (data['type'] == 'BILL_RECEIVED') {
+              showDialog(
+                context: context,
+                builder: (context) => AlertDialog(
+                  title: const Text('🧾 Bill Received'),
+                  content: Text('Amount: Rs. ${data['amount']}\nService: ${data['issue']}'),
+                  actions: [
+                    ElevatedButton(
+                      onPressed: () {
+                        Navigator.pop(context);
+                        Navigator.push(context, MaterialPageRoute(
+                          builder: (context) => PaymentScreen(
+                            mechanicName: _requestedMechanicName,
+                            issue: data['issue'].toString(),
+                            amount: double.parse(data['amount'].toString()),
+                            requestId: data['requestId'].toString(),
+                            stompClient: _stompClient!,
+                            userId: widget.userId,
+                            userName: widget.userName,
+                            userEmail: widget.userEmail,
+                          ),
+                        ));
+                      },
+                      style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFFF6B00)),
+                      child: const Text('Pay Now', style: TextStyle(color: Colors.white)),
+                    ),
+                  ],
+                ),
+              );
+              return;
+            }
+            setState(() {
+              _requestStatus = data['type'] == 'REQUEST_ACCEPTED' ? 'accepted' : 'rejected';
+            });
+            _showNotificationDialog(data['type']);
+            if (data['type'] == 'REQUEST_ACCEPTED') {
+              _startSendingLocationToMechanic();
+            }
+          },
+        );
+
+        _stompClient!.subscribe(
+          destination: '/topic/call/user/${widget.userId}',
+          callback: (frame) {
+            final data = jsonDecode(frame.body!);
+            if (data['type'] == 'OFFER') {
+              showDialog(
+                context: context,
+                barrierDismissible: false,
+                builder: (context) => AlertDialog(
+                  title: const Text('📞 Incoming Call'),
+                  content: Text('${widget.userName == data['callerName'] ? _requestedMechanicName : _requestedMechanicName} is calling...'),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text('Decline', style: TextStyle(color: Colors.red)),
+                    ),
+                    ElevatedButton(
+                      onPressed: () {
+                        Navigator.pop(context);
+                        Navigator.push(context, MaterialPageRoute(
+                          builder: (context) => CallScreen(
+                            stompClient: _stompClient!,
+                            isCaller: false,
+                            myType: 'user',
+                            myId: widget.userId,
+                            peerType: 'mechanic',
+                            peerId: _requestedMechanicId ?? 0,
+                            peerName: _requestedMechanicName,
+                            incomingOffer: data,
+                          ),
+                        ));
+                      },
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                      child: const Text('Accept', style: TextStyle(color: Colors.white)),
+                    ),
+                  ],
+                ),
+              );
+            }
+          },
+        );
+
+        _stompClient!.subscribe(
+          destination: '/topic/tracking/${widget.userId}',
+          callback: (frame) {
+            print('📍 USER received tracking data: ${frame.body}');
+            final data = jsonDecode(frame.body!);
+            // Optional: Check requestId if backend sends it
+            setState(() {
+              _markers.removeWhere((m) => m.markerId.value == 'mechanic');
+              _markers.add(Marker(
+                markerId: const MarkerId('mechanic'),
+                position: LatLng(data['lat'] as double, data['lng'] as double),
+                infoWindow: InfoWindow(title: '${data['mechanicName']} - On the way!'),
+                icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+              ));
+              if (_currentPosition != null) {
+                final meters = Geolocator.distanceBetween(
+                  _currentPosition!.latitude,
+                  _currentPosition!.longitude,
+                  data['lat'] as double,
+                  data['lng'] as double,
+                );
+                _mechanicDistanceText = '${(meters / 1000).toStringAsFixed(1)} km away';
+              }
+            });
+          },
+        );
+      },
+      onWebSocketError: (error) => print('WebSocket error: $error'),
+    ),
+  );
+  _stompClient!.activate();
+}
+
+void _showNotificationDialog(String type) {
+  showDialog(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(type == 'REQUEST_ACCEPTED' ? '✅ Request Accepted!' : '❌ Request Rejected'),
+      content: Text(type == 'REQUEST_ACCEPTED' ? 'Mechanic is on his way!' : 'Try another mechanic.'),
+      actions: [
+        ElevatedButton(
+          onPressed: () => Navigator.pop(context),
+          style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFFF6B00)),
+          child: const Text('OK', style: TextStyle(color: Colors.white)),
+        ),
+      ],
+    ),
+  );
+}
+
+void _showCancelDialog() {
+  final reasons = ['Mechanic taking too long', 'Found another mechanic', 'Changed my mind', 'Other'];
+  showDialog(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Cancel Request?'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: reasons.map((reason) => ListTile(
+          title: Text(reason),
+          onTap: () {
+            Navigator.pop(context);
+            _cancelTrip(reason);
+          },
+        )).toList(),
+      ),
+    ),
+  );
+}
+
+void _cancelTrip(String reason) {
+  if (_activeRequestId == null || _stompClient == null) return;
+  _stompClient!.send(
+    destination: '/app/request.cancel',
+    body: jsonEncode({
+      'requestId': _activeRequestId,
+      'cancelledBy': 'user',
+      'reason': reason,
+    }),
+  );
+  _locationSendSub?.cancel();
+  setState(() {
+    _requestSent = false;
+    _requestStatus = '';
+    _mechanicStage = 'accepted';
+    _activeRequestId = null;
+    _requestedMechanicId = null;
+    _markers.removeWhere((m) => m.markerId.value == 'mechanic');
+  });
+}
+
+void _startSendingLocationToMechanic() {
+  _locationSendSub?.cancel();
+  _locationSendSub = Geolocator.getPositionStream().listen((position) {
+    if (_stompClient == null || !_stompClient!.connected || _requestedMechanicId == null) return;
+    _stompClient!.send(
+      destination: '/app/user.location.update',
+      body: jsonEncode({
+        'mechanicId': _requestedMechanicId,
+        'userName': widget.userName,
+        'lat': position.latitude,
+        'lng': position.longitude,
+      }),
+    );
+  });
+}
+
+void _sendRequest(int mechanicId, String mechanicName) {
+  _requestedMechanicId = mechanicId;
+  _requestedMechanicName = mechanicName;
+  if (_currentPosition == null) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Location not available')),
+    );
+    return;
+  }
+
+  if (_stompClient == null || !_stompClient!.connected) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Connecting to server. Please try again in a moment.'),
+        backgroundColor: Colors.red,
+      ),
+    );
+    _connectWebSocket();
+    return;
+  }
+
+  final newRequestId = DateTime.now().millisecondsSinceEpoch.toString();
+    _activeRequestId = newRequestId;
+    _stompClient!.send(
+      destination: '/app/request.send',
+      body: jsonEncode({
+      'requestId': newRequestId,
+      'userId': widget.userId,
+      'mechanicId': mechanicId,
+      'userName': widget.userName,
+      'issue': _selectedIssue ?? 'Other',
+      'vehicleModel': _selectedVehicleModel ?? '',
+      'userLat': _currentPosition!.latitude,
+      'userLng': _currentPosition!.longitude,
+    }),
+  );
+
+  setState(() {
+    _requestSent = true;
+    _requestStatus = 'pending';
+  });
+}
 
   void _showVehicleDialog() {
     showDialog(
@@ -1028,12 +1372,14 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
             IconButton(icon: const Icon(Icons.directions_car, color: Colors.white), 
             onPressed: _showVehicleDialog),
           IconButton(
-            icon: const Icon(Icons.chat, color: Colors.white),
-            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const ChatScreen())),
-          ),
+              icon: const Icon(Icons.chat, color: Colors.white),
+              onPressed: () => Navigator.push(context, MaterialPageRoute(
+                builder: (context) => AiChatScreen(userId: widget.userId, userName: widget.userName),
+              )),
+            ),
           IconButton(
             icon: const Icon(Icons.person, color: Colors.white),
-            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => ProfileScreen(userName: widget.userName, userEmail: widget.userEmail))),
+                        onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => ProfileScreen(userName: widget.userName, userEmail: widget.userEmail, userId: widget.userId))),
           ),
         ],
       ),
@@ -1095,7 +1441,10 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Select Your Vehicle Issue', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                Text(
+                    AppTranslations.getText('selectIssue', widget.userLanguage),
+                        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                      ),
                   const SizedBox(height: 12),
                   GridView.builder(
                     shrinkWrap: true,
@@ -1133,68 +1482,107 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
               Container(
                 margin: const EdgeInsets.symmetric(horizontal: 16),
                 padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(color: Colors.green[50], borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.green)),
+                decoration: BoxDecoration(
+                  color: _requestStatus == 'accepted' ? Colors.green[50] : Colors.orange[50],
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: _requestStatus == 'accepted' ? Colors.green : Colors.orange),
+                ),
                 child: Row(
                   children: [
-                    const Icon(Icons.check_circle, color: Colors.green),
+                    Icon(
+                      _requestStatus == 'accepted' ? Icons.check_circle : Icons.hourglass_empty,
+                      color: _requestStatus == 'accepted' ? Colors.green : Colors.orange,
+                    ),
                     const SizedBox(width: 10),
-                    Expanded(child: Text('Mechanic found! Rajan is on his way for $_selectedIssue - ETA 8 mins', style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold))),
+                    Expanded(
+                      child: Text(
+                        _requestStatus != 'accepted'
+                          ? '⏳ Finding mechanic for $_selectedIssue...'
+                          : _mechanicStage == 'in_progress'
+                              ? '⚙️ Mechanic is working on your vehicle!'
+                              : _mechanicStage == 'arrived'
+                                  ? '🔧 Mechanic has reached your location!'
+                                  : '✅ Mechanic is on the way! $_mechanicDistanceText',
+                        style: TextStyle(
+                          color: _requestStatus == 'accepted' ? Colors.green : Colors.orange,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    if (_requestStatus == 'accepted')
+                      GestureDetector(
+                        onTap: () {
+                          Navigator.push(context, MaterialPageRoute(
+                            builder: (context) => CallScreen(
+                              stompClient: _stompClient!,
+                              isCaller: true,
+                              myType: 'user',
+                              myId: widget.userId,
+                              peerType: 'mechanic',
+                              peerId: _requestedMechanicId ?? 0,
+                              peerName: _requestedMechanicName,
+                            ),
+                          ));
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: const BoxDecoration(color: Colors.green, shape: BoxShape.circle),
+                          child: const Icon(Icons.call, color: Colors.white, size: 20),
+                        ),
+                      ),
+
+                    const SizedBox(width: 8),
+                    GestureDetector(
+                      onTap: _showCancelDialog,
+                      child: Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
+                        child: const Icon(Icons.close, color: Colors.white, size: 20),
+                      ),
+                    ),
+            
+
                   ],
                 ),
               ),
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Nearby Mechanics', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 12),
-                  _mechanics.isEmpty
-                      ? const Center(child: Text('No mechanics available nearby', style: TextStyle(color: Colors.grey)))
-                      : Column(
-                          children: _mechanics.map<Widget>((mechanic) {
-                            return Column(children: [
-                              _mechanicCard(mechanic['name'] ?? 'Unknown', '${(_mechanics.indexOf(mechanic) + 1) * 0.8} km', '4.8', 'All Vehicles'),
-                              const SizedBox(height: 10),
-                            ]);
-                          }).toList(),
-                        ),
-                ],
-              ),
-            ),
+            
             const SizedBox(height: 100),
           ],
         ),
       ),
       bottomNavigationBar: Container(
-        padding: const EdgeInsets.all(16),
+     s   padding: const EdgeInsets.all(16),
         color: Colors.white,
         child: ElevatedButton.icon(
           onPressed: () {
             if (_selectedIssue == null) {
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please select an issue first!'), backgroundColor: Colors.red));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Please select an issue first!'), backgroundColor: Colors.red),
+              );
             } else {
-              setState(() {
-                _requestSent = true;
-                if (_currentPosition != null) {
-                  _markers.add(Marker(
-                    markerId: const MarkerId('mechanic'),
-                    position: LatLng(_currentPosition!.latitude + 0.005, _currentPosition!.longitude + 0.005),
-                    infoWindow: const InfoWindow(title: 'Rajan Kumar - Mechanic'),
-                    icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
-                  ));
-                }
-              });
-              Future.delayed(const Duration(seconds: 5), () {
-                if (mounted) {
-                  Navigator.push(context, MaterialPageRoute(builder: (context) => PaymentScreen(mechanicName: 'Rajan Kumar', issue: _selectedIssue ?? 'Other')));
-                }
-              });
+              if (_mechanics.isNotEmpty) {
+                _sendRequest(
+                  _mechanics[0]['id'] as int,
+                  _mechanics[0]['name'] as String,
+                );
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('No mechanics available!'), backgroundColor: Colors.red),
+                );
+                return;
+              }
             }
           },
           icon: const Icon(Icons.build, color: Colors.white),
-          label: const Text('Request Mechanic', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-          style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFFF6B00), padding: const EdgeInsets.symmetric(vertical: 14), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
+          label: Text(
+                    AppTranslations.getText('requestMechanic', widget.userLanguage),
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                  ),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFFFF6B00),
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ),
         ),
       ),
     );
@@ -1219,18 +1607,388 @@ class _UserHomeScreenState extends State<UserHomeScreen> {
 // ============ MECHANIC HOME SCREEN ============
 class MechanicHomeScreen extends StatefulWidget {
   final String mechanicName;
-  const MechanicHomeScreen({super.key, required this.mechanicName});
+  final String mechanicLanguage;
+  final int mechanicId;
+  const MechanicHomeScreen({super.key, required this.mechanicName, required this.mechanicId, this.mechanicLanguage = 'en', });
   @override
   State<MechanicHomeScreen> createState() => _MechanicHomeScreenState();
 }
 
 class _MechanicHomeScreenState extends State<MechanicHomeScreen> {
   bool _isOnline = true;
-  final List<Map<String, String>> _requests = [
-    {'name': 'Arun Kumar', 'issue': 'Battery issue', 'distance': '0.8 km', 'time': '2 mins ago', 'vehicle': 'Toyota Corolla 2019'},
-    {'name': 'Priya S', 'issue': 'Flat tyre', 'distance': '1.5 km', 'time': '5 mins ago', 'vehicle': 'Honda Fit 2020'},
-    {'name': 'Mohan R', 'issue': 'Overheating', 'distance': '2.3 km', 'time': '8 mins ago', 'vehicle': 'Suzuki Alto 2018'},
-  ];
+  StompClient? _stompClient;
+  Position? _myPosition;
+  LatLng? _activeUserLocation;
+  String? _activeUserName;
+  StreamSubscription<Position>? _locationStreamSub;
+  int? _activeUserId;
+  String? _activeRequestId;
+  String _jobStage = 'ACCEPTED';
+  final TextEditingController _billController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _connectWebSocket();
+    _getMyLocation();
+  }
+
+  Future<void> _getMyLocation() async {
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) return;
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) return;
+    }
+    final position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+    setState(() => _myPosition = position);
+  }
+
+  final List<Map<String, dynamic>> _requests = [];
+
+  void _connectWebSocket() {
+  _stompClient = StompClient(
+    config: StompConfig(
+      url: 'ws://10.0.2.2:8081/ws/websocket',
+      onConnect: (frame) {
+        _stompClient!.subscribe(
+          destination: '/topic/mechanic/${widget.mechanicId}',
+          callback: (frame) {
+            final data = jsonDecode(frame.body!);
+            if (data['type'] == 'NEW_REQUEST') {
+              setState(() {
+                String distanceText = '-- km';
+                if (_myPosition != null && data['userLat'] != null && data['userLng'] != null) {
+                  final meters = Geolocator.distanceBetween(
+                    _myPosition!.latitude,
+                    _myPosition!.longitude,
+                    double.parse(data['userLat'].toString()),
+                    double.parse(data['userLng'].toString()),
+                  );
+                  distanceText = '${(meters / 1000).toStringAsFixed(1)} km';
+                }
+
+                _requests.insert(0, {
+                  'requestId': data['requestId'].toString(),
+                  'userId': data['userId'],
+                  'name': data['userName'].toString(),
+                  'issue': data['issue'].toString(),
+                  'distance': distanceText,
+                  'time': 'Just now',
+                  'vehicle': data['vehicleModel']?.toString() ?? 'Unknown',
+                });
+              });
+              showDialog(
+                context: context,
+                builder: (context) => AlertDialog(
+                  title: const Text('🔔 New Request!'),
+                  content: Text('${data['userName']} needs help!\nIssue: ${data['issue']}'),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text('View', style: TextStyle(color: Color(0xFFFF6B00))),
+                    ),
+                  ],
+                ),
+              );
+            } else if (data['type'] == 'REQUEST_CANCELLED') {
+              setState(() {
+                _activeUserLocation = null;
+                _activeUserName = null;
+                _activeUserId = null;
+                _activeRequestId = null;
+              });
+              _locationStreamSub?.cancel();
+              showDialog(
+                context: context,
+                builder: (context) => AlertDialog(
+                  title: const Text('❌ Request Cancelled'),
+                  content: Text('Customer cancelled the request.\nReason: ${data['reason']}'),
+                  actions: [
+                    ElevatedButton(
+                      onPressed: () => Navigator.pop(context),
+                      style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFFF6B00)),
+                      child: const Text('OK', style: TextStyle(color: Colors.white)),
+                    ),
+                  ],
+                ),
+              );
+
+                        } else if (data['type'] == 'CASH_PAYMENT_SELECTED') {
+              showDialog(
+                context: context,
+                barrierDismissible: false,
+                builder: (context) => AlertDialog(
+                  title: const Text('💵 Cash Payment'),
+                  content: Text('Customer selected Cash Payment.\nAmount: Rs. ${data['amount']}\n\nCollect the cash, then confirm below.'),
+                  actions: [
+                    ElevatedButton(
+                      onPressed: () {
+                        Navigator.pop(context);
+                        _stompClient?.send(
+                          destination: '/app/payment.cash.confirm',
+                          body: jsonEncode({'requestId': data['requestId']}),
+                        );
+                      },
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                      child: const Text('Cash Received', style: TextStyle(color: Colors.white)),
+                    ),
+                  ],
+                ),
+              );
+            
+            } else if (data['type'] == 'PAYMENT_RECEIVED') {
+              setState(() {
+                _activeUserLocation = null;
+                _activeUserName = null;
+                _activeUserId = null;
+                _activeRequestId = null;
+              });
+              _locationStreamSub?.cancel();
+              showDialog(
+                context: context,
+                builder: (context) => AlertDialog(
+                  title: const Text('💰 Payment Received!'),
+                  content: Text('Rs. ${data['amount']} via ${data['method']}'),
+                  actions: [
+                    ElevatedButton(
+                      onPressed: () => Navigator.pop(context),
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                      child: const Text('OK', style: TextStyle(color: Colors.white)),
+                    ),
+                  ],
+                ),
+              );
+            }
+          },
+        );
+        _stompClient!.subscribe(
+          destination: '/topic/mechanic-tracking/${widget.mechanicId}',
+          callback: (frame) {
+            if (_activeRequestId == null) return;
+            final data = jsonDecode(frame.body!);
+            setState(() {
+              _activeUserLocation = LatLng(data['lat'] as double, data['lng'] as double);
+              _activeUserName = data['userName']?.toString();
+            });
+          },
+        );
+
+        _stompClient!.subscribe(
+          destination: '/topic/call/mechanic/${widget.mechanicId}',
+          callback: (frame) {
+            final data = jsonDecode(frame.body!);
+            if (data['type'] == 'OFFER') {
+              showDialog(
+                context: context,
+                barrierDismissible: false,
+                builder: (context) => AlertDialog(
+                  title: const Text('📞 Incoming Call'),
+                  content: Text('${_activeUserName ?? "Customer"} is calling...'),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text('Decline', style: TextStyle(color: Colors.red)),
+                    ),
+                    ElevatedButton(
+                      onPressed: () {
+                        Navigator.pop(context);
+                        Navigator.push(context, MaterialPageRoute(
+                          builder: (context) => CallScreen(
+                            stompClient: _stompClient!,
+                            isCaller: false,
+                            myType: 'mechanic',
+                            myId: widget.mechanicId,
+                            peerType: 'user',
+                            peerId: _activeUserId ?? 0,
+                            peerName: _activeUserName ?? 'Customer',
+                            incomingOffer: data,
+                          ),
+                        ));
+                      },
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                      child: const Text('Accept', style: TextStyle(color: Colors.white)),
+                    ),
+                  ],
+                ),
+              );
+            }
+          },
+        );
+      },
+      onWebSocketError: (error) => print('WebSocket error: $error'),
+    ),
+  );
+  _stompClient!.activate();
+}
+
+ @override
+  void dispose() {
+    _locationStreamSub?.cancel();
+    super.dispose();
+  }
+
+void _acceptRequest(String requestId, int userId, String mechanicName) {
+  // First send accept response
+  _locationStreamSub?.cancel();
+  _activeUserId = userId;
+  _activeRequestId = requestId;
+  _jobStage = 'ACCEPTED';
+  _stompClient?.send(
+    destination: '/app/request.respond',
+    body: jsonEncode({
+      'requestId': requestId,
+      'status': 'ACCEPTED',
+      'mechanicId': widget.mechanicId,
+      'userId': userId,
+    }),
+  );
+  
+  // Then start location streaming
+// Then start location streaming
+  _locationStreamSub = Geolocator.getPositionStream().listen((position) {
+        print('📍 MECHANIC sending location: ${position.latitude}, ${position.longitude} to userId=$userId');
+    _stompClient?.send(
+      destination: '/app/location.update',
+      body: jsonEncode({
+        'requestId': requestId,
+        'userId': userId,
+        'lat': position.latitude,
+        'lng': position.longitude,
+        'mechanicName': mechanicName,
+      }),
+    );
+  });
+}
+
+
+void _rejectRequest(String requestId, int userId) {
+  _locationStreamSub?.cancel();
+  _stompClient?.send(
+    destination: '/app/request.respond',
+    body: jsonEncode({
+      'requestId': requestId,
+      'status': 'REJECTED',
+      'mechanicId': widget.mechanicId,
+      'userId': userId,
+    }),
+  );
+}
+
+void _markArrived() {
+  if (_activeRequestId == null || _stompClient == null) return;
+  _stompClient!.send(
+    destination: '/app/request.arrived',
+    body: jsonEncode({'requestId': _activeRequestId}),
+  );
+  setState(() => _jobStage = 'ARRIVED');
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(content: Text('Marked as reached!'), backgroundColor: Colors.green),
+  );
+}
+
+void _startWork() {
+  if (_activeRequestId == null || _stompClient == null) return;
+  _stompClient!.send(
+    destination: '/app/request.startwork',
+    body: jsonEncode({'requestId': _activeRequestId}),
+  );
+  setState(() => _jobStage = 'IN_PROGRESS');
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(content: Text('Work started!'), backgroundColor: Colors.green),
+  );
+}
+
+
+void _showCancelJobDialog() {
+  final reasons = ['Vehicle too far', 'Emergency came up', 'Unable to reach location', 'Other'];
+  showDialog(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Cancel Job?'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: reasons.map((reason) => ListTile(
+          title: Text(reason),
+          onTap: () {
+            Navigator.pop(context);
+            _cancelJob(reason);
+          },
+        )).toList(),
+      ),
+    ),
+  );
+}
+
+void _showBillDialog() {
+  _billController.clear();
+  showDialog(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Complete Job - Send Bill'),
+      content: TextField(
+        controller: _billController,
+        keyboardType: TextInputType.number,
+        decoration: const InputDecoration(
+          prefixText: 'Rs. ',
+          hintText: 'Enter bill amount',
+          border: OutlineInputBorder(),
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+        ElevatedButton(
+          onPressed: () {
+            final amount = double.tryParse(_billController.text.trim());
+            if (amount == null || amount <= 0) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Enter a valid amount'), backgroundColor: Colors.red),
+              );
+              return;
+            }
+            Navigator.pop(context);
+            _sendBill(amount);
+          },
+          style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFFF6B00)),
+          child: const Text('Send Bill', style: TextStyle(color: Colors.white)),
+        ),
+      ],
+    ),
+  );
+}
+
+void _sendBill(double amount) {
+  if (_activeRequestId == null || _stompClient == null) return;
+  _stompClient!.send(
+    destination: '/app/bill.send',
+    body: jsonEncode({'requestId': _activeRequestId, 'amount': amount}),
+  );
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(content: Text('Bill sent to customer!'), backgroundColor: Colors.green),
+  );
+}
+
+void _cancelJob(String reason) {
+  if (_activeRequestId == null || _stompClient == null) return;
+  _stompClient!.send(
+    destination: '/app/request.cancel',
+    body: jsonEncode({
+      'requestId': _activeRequestId,
+      'cancelledBy': 'mechanic',
+      'reason': reason,
+    }),
+  );
+  _locationStreamSub?.cancel();
+  setState(() {
+    _activeUserLocation = null;
+    _activeUserName = null;
+    _activeUserId = null;
+    _activeRequestId = null;
+    _jobStage = 'ACCEPTED';
+  });
+}
 
   @override
   Widget build(BuildContext context) {
@@ -1243,7 +2001,7 @@ class _MechanicHomeScreenState extends State<MechanicHomeScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.person, color: Colors.white),
-            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => MechanicProfileScreen(mechanicName: widget.mechanicName))),
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => MechanicProfileScreen(mechanicName: widget.mechanicName, mechanicId: widget.mechanicId))),
           ),
         ],
       ),
@@ -1265,6 +2023,112 @@ class _MechanicHomeScreenState extends State<MechanicHomeScreen> {
               ],
             ),
           ),
+
+         if (_activeUserLocation != null)
+            Container(
+              height: 220,
+              margin: const EdgeInsets.symmetric(horizontal: 16),
+              decoration: BoxDecoration(borderRadius: BorderRadius.circular(12)),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: GoogleMap(
+                  initialCameraPosition: CameraPosition(target: _activeUserLocation!, zoom: 14),
+                  myLocationEnabled: true,
+                  myLocationButtonEnabled: true,
+                  markers: {
+                    Marker(
+                      markerId: const MarkerId('activeUser'),
+                      position: _activeUserLocation!,
+                      infoWindow: InfoWindow(title: _activeUserName ?? 'Customer'),
+                      icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
+                    ),
+                  },
+                ),
+              ),
+            ),
+          if (_activeUserLocation != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: () {
+                    Navigator.push(context, MaterialPageRoute(
+                      builder: (context) => CallScreen(
+                        stompClient: _stompClient!,
+                        isCaller: true,
+                        myType: 'mechanic',
+                        myId: widget.mechanicId,
+                        peerType: 'user',
+                        peerId: _activeUserId ?? 0,
+                        peerName: _activeUserName ?? 'Customer',
+                      ),
+                    ));
+                  },
+                  icon: const Icon(Icons.call, color: Colors.white),
+                  label: Text('Call ${_activeUserName ?? "Customer"}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.green, padding: const EdgeInsets.symmetric(vertical: 12)),
+                ),
+              ),
+            ),
+
+                    if (_activeUserLocation != null && _jobStage == 'ACCEPTED')
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _markArrived,
+                  icon: const Icon(Icons.location_on, color: Colors.white),
+                  label: const Text("I've Reached", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.blue, padding: const EdgeInsets.symmetric(vertical: 12)),
+                ),
+              ),
+            ),
+          if (_activeUserLocation != null && _jobStage == 'ARRIVED')
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _startWork,
+                  icon: const Icon(Icons.build, color: Colors.white),
+                  label: const Text('Start Work', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange, padding: const EdgeInsets.symmetric(vertical: 12)),
+                ),
+              ),
+            ),
+         
+
+          if (_activeUserLocation != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _showBillDialog,
+                  icon: const Icon(Icons.receipt_long, color: Colors.white),
+                  label: const Text('Complete Job & Send Bill', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.green, padding: const EdgeInsets.symmetric(vertical: 12)),
+                ),
+              ),
+            ),
+          if (_activeUserLocation != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              child: SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: _showCancelJobDialog,
+                  icon: const Icon(Icons.close, color: Colors.red),
+                  label: const Text('Cancel Job', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+                  style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.red), padding: const EdgeInsets.symmetric(vertical: 12)),
+                ),
+              ),
+            ),
+          const SizedBox(height: 12),
+          const SizedBox(height: 12),
+
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 16),
             child: Align(alignment: Alignment.centerLeft, child: Text('Incoming Requests', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
@@ -1297,14 +2161,25 @@ class _MechanicHomeScreenState extends State<MechanicHomeScreen> {
                             ]),
                             const SizedBox(height: 8),
                             Row(
-                              children: [
-                                Expanded(child: OutlinedButton(onPressed: () => setState(() => _requests.removeAt(index)), style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.red)), child: const Text('Decline', style: TextStyle(color: Colors.red)))),
+                              children: [Expanded(child: OutlinedButton( 
+                                onPressed: () {
+                                    _rejectRequest(_requests[index]['requestId'] ?? '1', _requests[index]['userId'] as int);
+                                    setState(() => _requests.removeAt(index));
+                                  },
+                                style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.red)), child: const Text('Decline', style: TextStyle(color: Colors.red)))),
                                 const SizedBox(width: 10),
                                 Expanded(child: ElevatedButton(
                                   onPressed: () {
-                                    setState(() => _requests.removeAt(index));
-                                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Job Accepted!'), backgroundColor: Colors.green));
-                                  },
+                                      _acceptRequest(
+                                          _requests[index]['requestId'] ?? '1',
+                                          _requests[index]['userId'] as int,
+                                          widget.mechanicName,
+                                        );
+                                      setState(() => _requests.removeAt(index));
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        const SnackBar(content: Text('Job Accepted! Navigating to customer.'), backgroundColor: Colors.green),
+                                      );
+                                    },
                                   style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFFF6B00)),
                                   child: const Text('Accept', style: TextStyle(color: Colors.white)),
                                 )),
@@ -1486,7 +2361,8 @@ class _ChatScreenState extends State<ChatScreen> {
 class ProfileScreen extends StatefulWidget {
   final String userName;
   final String userEmail;
-  const ProfileScreen({super.key, required this.userName, required this.userEmail});
+  final int userId;
+  const ProfileScreen({super.key, required this.userName, required this.userEmail, required this.userId});
   @override
   State<ProfileScreen> createState() => _ProfileScreenState();
 }
@@ -1495,18 +2371,40 @@ class _ProfileScreenState extends State<ProfileScreen> {
   final _nameController = TextEditingController();
   final _phoneController = TextEditingController();
   bool _isEditing = false;
+  bool _loadingHistory = true;
 
-  final List<Map<String, dynamic>> _activities = [
-    {'icon': '🔧', 'title': 'Mechanic Requested', 'subtitle': 'Battery issue - Rajan Kumar', 'time': '2 hours ago', 'color': Colors.orange},
-    {'icon': '✅', 'title': 'Service Completed', 'subtitle': 'Tyre replacement - Suresh M', 'time': 'Yesterday', 'color': Colors.green},
-    {'icon': '💬', 'title': 'AI Chat Session', 'subtitle': 'Engine overheating query', 'time': '2 days ago', 'color': Colors.blue},
-    {'icon': '🔧', 'title': 'Mechanic Requested', 'subtitle': 'Brake issue - Anbu S', 'time': '1 week ago', 'color': Colors.orange},
-  ];
+  List<Map<String, dynamic>> _activities = [];
+
+  Future<void> _fetchHistory() async {
+    try {
+      final response = await http.get(Uri.parse('http://10.0.2.2:8081/api/requests/user/${widget.userId}/history'));
+      if (response.statusCode == 200) {
+        final List<dynamic> data = jsonDecode(response.body);
+        setState(() {
+          _activities = data.map((item) {
+            return {
+              'icon': '✅',
+              'title': 'Service Completed',
+              'subtitle': '${item['issue'] ?? ''} - Rs. ${item['amount'] ?? 0}',
+              'time': item['completedAt']?.toString().substring(0, 10) ?? '',
+              'color': Colors.green,
+            };
+          }).toList();
+          _loadingHistory = false;
+        });
+      } else {
+        setState(() => _loadingHistory = false);
+      }
+    } catch (e) {
+      setState(() => _loadingHistory = false);
+    }
+  }
 
   @override
   void initState() {
     super.initState();
     _nameController.text = widget.userName;
+    _fetchHistory();
   }
 
   @override
@@ -1596,19 +2494,24 @@ class _ProfileScreenState extends State<ProfileScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Recent Activity', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                                    const Text('Recent Activity', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                   const SizedBox(height: 12),
-                  ..._activities.map((activity) => Container(
-                    margin: const EdgeInsets.only(bottom: 12),
-                    child: Row(
-                      children: [
-                        Container(width: 44, height: 44, decoration: BoxDecoration(color: (activity['color'] as Color).withAlpha(25), borderRadius: BorderRadius.circular(12)), child: Center(child: Text(activity['icon'], style: const TextStyle(fontSize: 20)))),
-                        const SizedBox(width: 12),
-                        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(activity['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)), Text(activity['subtitle'], style: TextStyle(color: Colors.grey[600], fontSize: 12))])),
-                        Text(activity['time'], style: TextStyle(color: Colors.grey[400], fontSize: 11)),
-                      ],
-                    ),
-                  )),
+                  if (_loadingHistory)
+                    const Center(child: Padding(padding: EdgeInsets.all(12), child: CircularProgressIndicator(color: Color(0xFFFF6B00))))
+                  else if (_activities.isEmpty)
+                    const Padding(padding: EdgeInsets.all(12), child: Text('No completed services yet', style: TextStyle(color: Colors.grey)))
+                  else
+                    ..._activities.map((activity) => Container(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      child: Row(
+                        children: [
+                          Container(width: 44, height: 44, decoration: BoxDecoration(color: (activity['color'] as Color).withAlpha(25), borderRadius: BorderRadius.circular(12)), child: Center(child: Text(activity['icon'], style: const TextStyle(fontSize: 20)))),
+                          const SizedBox(width: 12),
+                          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(activity['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)), Text(activity['subtitle'], style: TextStyle(color: Colors.grey[600], fontSize: 12))])),
+                          Text(activity['time'], style: TextStyle(color: Colors.grey[400], fontSize: 11)),
+                        ],
+                      ),
+                    )),
                 ],
               ),
             ),
@@ -1669,7 +2572,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
 // ============ MECHANIC PROFILE SCREEN ============
 class MechanicProfileScreen extends StatefulWidget {
   final String mechanicName;
-  const MechanicProfileScreen({super.key, required this.mechanicName});
+  final int mechanicId;
+  const MechanicProfileScreen({super.key, required this.mechanicName, required this.mechanicId});
   @override
   State<MechanicProfileScreen> createState() => _MechanicProfileScreenState();
 }
@@ -1679,19 +2583,57 @@ class _MechanicProfileScreenState extends State<MechanicProfileScreen> {
   final _phoneController = TextEditingController();
   bool _isEditing = false;
   bool _isOnline = true;
+  bool _loadingStats = true;
   final List<String> _skills = ['Engine', 'Electrical', 'Tyre', 'Battery', 'Brake', 'AC'];
   final List<String> _selectedSkills = ['Engine', 'Electrical'];
 
-  final List<Map<String, dynamic>> _activities = [
-    {'icon': '✅', 'title': 'Job Completed', 'subtitle': 'Battery - Arun Kumar', 'time': '1 hour ago', 'color': Colors.green},
-    {'icon': '✅', 'title': 'Job Completed', 'subtitle': 'Tyre - Priya S', 'time': 'Yesterday', 'color': Colors.green},
-    {'icon': '❌', 'title': 'Job Declined', 'subtitle': 'Engine - Mohan R', 'time': '2 days ago', 'color': Colors.red},
-  ];
+  List<Map<String, dynamic>> _activities = [];
+  int _jobsDone = 0;
+  double _earnings = 0;
+  double _avgRating = 0;
+
+  Future<void> _fetchStats() async {
+    try {
+      final allResponse = await http.get(Uri.parse('http://10.0.2.2:8081/api/users/all'));
+      if (allResponse.statusCode == 200) {
+        final List<dynamic> allUsers = jsonDecode(allResponse.body);
+        final mech = allUsers.firstWhere(
+          (u) => u['id'] == widget.mechanicId,
+          orElse: () => null,
+        );
+        if (mech != null) {
+          _jobsDone = mech['jobsDone'] ?? 0;
+          _earnings = (mech['totalEarnings'] ?? 0).toDouble();
+          final ratingSum = (mech['ratingSum'] ?? 0).toDouble();
+          final ratingCount = (mech['ratingCount'] ?? 0);
+          _avgRating = ratingCount == 0 ? 0 : ratingSum / ratingCount;
+        }
+      }
+
+      final historyResponse = await http.get(Uri.parse('http://10.0.2.2:8081/api/requests/mechanic/${widget.mechanicId}/history'));
+      if (historyResponse.statusCode == 200) {
+        final List<dynamic> data = jsonDecode(historyResponse.body);
+        _activities = data.map((item) {
+          return {
+            'icon': '✅',
+            'title': 'Job Completed',
+            'subtitle': '${item['issue'] ?? ''} - ${item['userName'] ?? ''}',
+            'time': item['completedAt']?.toString().substring(0, 10) ?? '',
+            'color': Colors.green,
+          };
+        }).toList();
+      }
+      setState(() => _loadingStats = false);
+    } catch (e) {
+      setState(() => _loadingStats = false);
+    }
+  }
 
   @override
   void initState() {
     super.initState();
     _nameController.text = widget.mechanicName;
+    _fetchStats();
   }
 
   @override
@@ -1746,11 +2688,11 @@ class _MechanicProfileScreenState extends State<MechanicProfileScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Row(
                 children: [
-                  Expanded(child: Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 5)]), child: const Column(children: [Text('24', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Color(0xFFFF6B00))), Text('Jobs Done', style: TextStyle(color: Colors.grey, fontSize: 12))]))),
+                  Expanded(child: Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 5)]), child: Column(children: [Text('$_jobsDone', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Color(0xFFFF6B00))), const Text('Jobs Done', style: TextStyle(color: Colors.grey, fontSize: 12))]))),
                   const SizedBox(width: 10),
-                  Expanded(child: Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 5)]), child: const Column(children: [Text('Rs.12,400', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.green)), Text('Earnings', style: TextStyle(color: Colors.grey, fontSize: 12))]))),
+                  Expanded(child: Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 5)]), child: Column(children: [Text('Rs.${_earnings.toStringAsFixed(0)}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.green)), const Text('Earnings', style: TextStyle(color: Colors.grey, fontSize: 12))]))),
                   const SizedBox(width: 10),
-                  Expanded(child: Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 5)]), child: const Column(children: [Text('4.8⭐', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.orange)), Text('Rating', style: TextStyle(color: Colors.grey, fontSize: 12))]))),
+                  Expanded(child: Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 5)]), child: Column(children: [Text('${_avgRating.toStringAsFixed(1)}⭐', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.orange)), const Text('Rating', style: TextStyle(color: Colors.grey, fontSize: 12))]))),
                 ],
               ),
             ),
@@ -1818,19 +2760,24 @@ class _MechanicProfileScreenState extends State<MechanicProfileScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Recent Activity', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                                      const Text('Recent Activity', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                   const SizedBox(height: 12),
-                  ..._activities.map((activity) => Container(
-                    margin: const EdgeInsets.only(bottom: 12),
-                    child: Row(
-                      children: [
-                        Container(width: 44, height: 44, decoration: BoxDecoration(color: (activity['color'] as Color).withAlpha(25), borderRadius: BorderRadius.circular(12)), child: Center(child: Text(activity['icon'], style: const TextStyle(fontSize: 20)))),
-                        const SizedBox(width: 12),
-                        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(activity['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)), Text(activity['subtitle'], style: TextStyle(color: Colors.grey[600], fontSize: 12))])),
-                        Text(activity['time'], style: TextStyle(color: Colors.grey[400], fontSize: 11)),
-                      ],
-                    ),
-                  )),
+                  if (_loadingStats)
+                    const Center(child: Padding(padding: EdgeInsets.all(12), child: CircularProgressIndicator(color: Color(0xFFFF6B00))))
+                  else if (_activities.isEmpty)
+                    const Padding(padding: EdgeInsets.all(12), child: Text('No completed jobs yet', style: TextStyle(color: Colors.grey)))
+                  else
+                    ..._activities.map((activity) => Container(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      child: Row(
+                        children: [
+                          Container(width: 44, height: 44, decoration: BoxDecoration(color: (activity['color'] as Color).withAlpha(25), borderRadius: BorderRadius.circular(12)), child: Center(child: Text(activity['icon'], style: const TextStyle(fontSize: 20)))),
+                          const SizedBox(width: 12),
+                          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(activity['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)), Text(activity['subtitle'], style: TextStyle(color: Colors.grey[600], fontSize: 12))])),
+                          Text(activity['time'], style: TextStyle(color: Colors.grey[400], fontSize: 11)),
+                        ],
+                      ),
+                    )),
                 ],
               ),
             ),
@@ -1872,7 +2819,20 @@ class _MechanicProfileScreenState extends State<MechanicProfileScreen> {
 // ============ RATING SCREEN ============
 class RatingScreen extends StatefulWidget {
   final String mechanicName;
-  const RatingScreen({super.key, required this.mechanicName});
+  final String requestId;
+  final String userName;
+  final String userEmail;
+  final int userId;
+  final String userLanguage;
+  const RatingScreen({
+    super.key,
+    required this.mechanicName,
+    required this.requestId,
+    required this.userName,
+    required this.userEmail,
+    required this.userId,
+    this.userLanguage = 'en',
+  });
   @override
   State<RatingScreen> createState() => _RatingScreenState();
 }
@@ -1907,7 +2867,16 @@ class _RatingScreenState extends State<RatingScreen> {
           const Text('Your rating has been submitted!', style: TextStyle(color: Colors.grey)),
           const SizedBox(height: 24),
           ElevatedButton(
-            onPressed: () => Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (context) => const LoginScreen()), (route) => false),
+            onPressed: () => Navigator.pushAndRemoveUntil(
+              context,
+              MaterialPageRoute(builder: (context) => UserHomeScreen(
+                userName: widget.userName,
+                userEmail: widget.userEmail,
+                userId: widget.userId,
+                userLanguage: widget.userLanguage,
+              )),
+              (route) => false,
+            ),
             style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFFF6B00), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
             child: const Text('Back to Home', style: TextStyle(color: Colors.white)),
           ),
@@ -1946,7 +2915,24 @@ class _RatingScreenState extends State<RatingScreen> {
             width: double.infinity,
             height: 50,
             child: ElevatedButton(
-              onPressed: _rating == 0 ? null : () => setState(() => _submitted = true),
+              onPressed: _rating == 0
+                  ? null
+                  : () async {
+                      try {
+                        await http.post(
+                          Uri.parse('http://10.0.2.2:8081/api/users/rate'),
+                          headers: {'Content-Type': 'application/json'},
+                          body: jsonEncode({
+                            'requestId': widget.requestId,
+                            'rating': _rating,
+                            'review': _commentController.text.trim(),
+                          }),
+                        );
+                      } catch (e) {
+                        // ignore, still show thank you
+                      }
+                      if (mounted) setState(() => _submitted = true);
+                    },
               style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFFF6B00), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
               child: const Text('Submit Rating', style: TextStyle(fontSize: 18, color: Colors.white, fontWeight: FontWeight.bold)),
             ),
@@ -1962,7 +2948,23 @@ class _RatingScreenState extends State<RatingScreen> {
 class PaymentScreen extends StatefulWidget {
   final String mechanicName;
   final String issue;
-  const PaymentScreen({super.key, required this.mechanicName, required this.issue});
+  final double amount;
+  final String requestId;
+  final StompClient stompClient;
+  final int userId;
+  final String userName;
+  final String userEmail;
+  const PaymentScreen({
+    super.key,
+    required this.mechanicName,
+    required this.issue,
+    required this.amount,
+    required this.requestId,
+    required this.stompClient,
+    required this.userId,
+    required this.userName,
+    required this.userEmail,
+  });
   @override
   State<PaymentScreen> createState() => _PaymentScreenState();
 }
@@ -1970,15 +2972,28 @@ class PaymentScreen extends StatefulWidget {
 class _PaymentScreenState extends State<PaymentScreen> {
   String _selectedPayment = '';
   bool _paid = false;
+  bool _waitingCashConfirm = false;
 
-  final Map<String, int> _issueCost = {
-    'Battery': 2500, 'Tyre': 1500, 'Engine': 5000, 'Overheating': 3000,
-    'Brake': 3500, 'Strange Noise': 2000, 'Electrical': 2500, 'Other': 2000,
-  };
+  @override
+  void initState() {
+    super.initState();
+    widget.stompClient.subscribe(
+      destination: '/topic/user/${widget.userId}',
+      callback: (frame) {
+        final data = jsonDecode(frame.body!);
+        if (data['type'] == 'PAYMENT_CONFIRMED' && mounted) {
+          setState(() {
+            _waitingCashConfirm = false;
+            _paid = true;
+          });
+        }
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    final cost = _issueCost[widget.issue] ?? 2000;
+    final cost = widget.amount.toInt();
     return Scaffold(
       backgroundColor: Colors.grey[100],
       appBar: AppBar(
@@ -1986,7 +3001,22 @@ class _PaymentScreenState extends State<PaymentScreen> {
         title: const Text('Payment', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
         leading: IconButton(icon: const Icon(Icons.arrow_back, color: Colors.white), onPressed: () => Navigator.pop(context)),
       ),
-      body: _paid ? _buildSuccess() : _buildPayment(cost),
+      body: _paid
+          ? _buildSuccess()
+          : (_waitingCashConfirm ? _buildWaiting() : _buildPayment(cost)),
+    );
+  }
+
+  Widget _buildWaiting() {
+    return const Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          CircularProgressIndicator(color: Color(0xFFFF6B00)),
+          SizedBox(height: 16),
+          Text('Waiting for mechanic to confirm\ncash received...', textAlign: TextAlign.center, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        ],
+      ),
     );
   }
 
@@ -2002,7 +3032,13 @@ class _PaymentScreenState extends State<PaymentScreen> {
           const Text('Thank you for using MechNow!', style: TextStyle(color: Colors.grey)),
           const SizedBox(height: 24),
           ElevatedButton(
-            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => RatingScreen(mechanicName: widget.mechanicName))),
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => RatingScreen(
+              mechanicName: widget.mechanicName,
+              requestId: widget.requestId,
+              userName: widget.userName,
+              userEmail: widget.userEmail,
+              userId: widget.userId,
+            ))),
             style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFFF6B00), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
             child: const Text('Rate Your Mechanic', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
           ),
@@ -2028,10 +3064,6 @@ class _PaymentScreenState extends State<PaymentScreen> {
                 Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [const Text('Service'), Text(widget.issue)]),
                 const SizedBox(height: 8),
                 Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [const Text('Mechanic'), Text(widget.mechanicName)]),
-                const SizedBox(height: 8),
-                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [const Text('Service Charge'), Text('Rs. ${cost - 200}')]),
-                const SizedBox(height: 8),
-                const Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text('Platform Fee'), Text('Rs. 200')]),
                 const Divider(),
                 Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
                   const Text('Total', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
@@ -2048,11 +3080,27 @@ class _PaymentScreenState extends State<PaymentScreen> {
           _paymentOption('📱', 'Dialog Pay', 'Mobile payment'),
           _paymentOption('🏦', 'Bank Transfer', 'Online banking'),
           const SizedBox(height: 24),
-          SizedBox(
+                    SizedBox(
             width: double.infinity,
             height: 50,
             child: ElevatedButton(
-              onPressed: _selectedPayment.isEmpty ? null : () => setState(() => _paid = true),
+              onPressed: _selectedPayment.isEmpty
+                  ? null
+                  : () {
+                      if (_selectedPayment == 'Cash Payment') {
+                        widget.stompClient.send(
+                          destination: '/app/payment.cash.select',
+                          body: jsonEncode({'requestId': widget.requestId}),
+                        );
+                        setState(() => _waitingCashConfirm = true);
+                      } else {
+                        widget.stompClient.send(
+                          destination: '/app/payment.card.complete',
+                          body: jsonEncode({'requestId': widget.requestId}),
+                        );
+                        setState(() => _paid = true);
+                      }
+                    },
               style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFFF6B00), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
               child: Text(_selectedPayment.isEmpty ? 'Select Payment Method' : 'Pay Rs. $cost', style: const TextStyle(fontSize: 18, color: Colors.white, fontWeight: FontWeight.bold)),
             ),
@@ -2077,6 +3125,194 @@ class _PaymentScreenState extends State<PaymentScreen> {
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(title, style: const TextStyle(fontWeight: FontWeight.bold)), Text(subtitle, style: TextStyle(color: Colors.grey[600], fontSize: 12))])),
             if (isSelected) const Icon(Icons.check_circle, color: Color(0xFFFF6B00)),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+
+// ============ CALL SCREEN (WebRTC Voice Call) ============
+class CallScreen extends StatefulWidget {
+  final StompClient stompClient;
+  final bool isCaller;
+  final String myType; // 'user' or 'mechanic'
+  final int myId;
+  final String peerType;
+  final int peerId;
+  final String peerName;
+  final Map<String, dynamic>? incomingOffer;
+
+  const CallScreen({
+    super.key,
+    required this.stompClient,
+    required this.isCaller,
+    required this.myType,
+    required this.myId,
+    required this.peerType,
+    required this.peerId,
+    required this.peerName,
+    this.incomingOffer,
+  });
+
+  @override
+  State<CallScreen> createState() => _CallScreenState();
+}
+
+class _CallScreenState extends State<CallScreen> {
+  RTCPeerConnection? _peerConnection;
+  MediaStream? _localStream;
+  bool _muted = false;
+  String _status = 'Connecting...';
+
+  final Map<String, dynamic> _iceServers = {
+    'iceServers': [
+      {'urls': 'stun:stun.l.google.com:19302'},
+      {'urls': 'stun:stun1.l.google.com:19302'},
+    ]
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    _setupCall();
+  }
+
+  Future<void> _setupCall() async {
+    _peerConnection = await createPeerConnection(_iceServers);
+
+    _localStream = await navigator.mediaDevices.getUserMedia({'audio': true, 'video': false});
+    _localStream!.getTracks().forEach((track) {
+      _peerConnection!.addTrack(track, _localStream!);
+    });
+
+    _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
+      _sendSignal({
+        'type': 'ICE_CANDIDATE',
+        'candidate': candidate.candidate,
+        'sdpMid': candidate.sdpMid,
+        'sdpMLineIndex': candidate.sdpMLineIndex,
+      });
+    };
+
+    _peerConnection!.onConnectionState = (RTCPeerConnectionState state) {
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        if (mounted) setState(() => _status = 'Connected');
+      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
+          state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+          state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+        if (mounted) {
+          setState(() => _status = 'Call ended');
+          Future.delayed(const Duration(seconds: 1), () {
+            if (mounted) Navigator.pop(context);
+          });
+        }
+      }
+    };
+
+    widget.stompClient.subscribe(
+      destination: '/topic/call/${widget.myType}/${widget.myId}',
+      callback: (frame) async {
+        final data = jsonDecode(frame.body!);
+        if (data['type'] == 'ANSWER' && widget.isCaller) {
+          await _peerConnection!.setRemoteDescription(RTCSessionDescription(data['sdp'], 'answer'));
+        } else if (data['type'] == 'ICE_CANDIDATE') {
+          await _peerConnection!.addCandidate(
+            RTCIceCandidate(data['candidate'], data['sdpMid'], data['sdpMLineIndex']),
+          );
+        } else if (data['type'] == 'END_CALL') {
+          if (mounted) Navigator.pop(context);
+        }
+      },
+    );
+
+    if (widget.isCaller) {
+      setState(() => _status = 'Calling ${widget.peerName}...');
+      RTCSessionDescription offer = await _peerConnection!.createOffer();
+      await _peerConnection!.setLocalDescription(offer);
+      _sendSignal({'type': 'OFFER', 'sdp': offer.sdp});
+    } else {
+      setState(() => _status = 'Connecting...');
+      await _peerConnection!.setRemoteDescription(RTCSessionDescription(widget.incomingOffer!['sdp'], 'offer'));
+      RTCSessionDescription answer = await _peerConnection!.createAnswer();
+      await _peerConnection!.setLocalDescription(answer);
+      _sendSignal({'type': 'ANSWER', 'sdp': answer.sdp});
+    }
+  }
+
+  void _sendSignal(Map<String, dynamic> payload) {
+    payload['targetType'] = widget.peerType;
+    payload['targetId'] = widget.peerId.toString();
+    widget.stompClient.send(destination: '/app/call.signal', body: jsonEncode(payload));
+  }
+
+  void _toggleMute() {
+    _muted = !_muted;
+    _localStream?.getAudioTracks().forEach((track) => track.enabled = !_muted);
+    setState(() {});
+  }
+
+  void _endCall() {
+    _sendSignal({'type': 'END_CALL'});
+    Navigator.pop(context);
+  }
+
+  @override
+  void dispose() {
+    _localStream?.getTracks().forEach((track) => track.stop());
+    _localStream?.dispose();
+    _peerConnection?.close();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFFF6B00),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            children: [
+              const SizedBox(height: 60),
+              CircleAvatar(
+                radius: 60,
+                backgroundColor: Colors.white,
+                child: Text(
+                  widget.peerName.isNotEmpty ? widget.peerName[0].toUpperCase() : '?',
+                  style: const TextStyle(fontSize: 48, fontWeight: FontWeight.bold, color: Color(0xFFFF6B00)),
+                ),
+              ),
+              const SizedBox(height: 24),
+              Text(widget.peerName, style: const TextStyle(fontSize: 26, color: Colors.white, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              Text(_status, style: const TextStyle(fontSize: 16, color: Colors.white70)),
+              const Spacer(),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  GestureDetector(
+                    onTap: _toggleMute,
+                    child: CircleAvatar(
+                      radius: 30,
+                      backgroundColor: _muted ? Colors.white : Colors.white24,
+                      child: Icon(_muted ? Icons.mic_off : Icons.mic, color: _muted ? const Color(0xFFFF6B00) : Colors.white),
+                    ),
+                  ),
+                  const SizedBox(width: 40),
+                  GestureDetector(
+                    onTap: _endCall,
+                    child: const CircleAvatar(
+                      radius: 34,
+                      backgroundColor: Colors.red,
+                      child: Icon(Icons.call_end, color: Colors.white, size: 30),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 40),
+            ],
+          ),
         ),
       ),
     );
