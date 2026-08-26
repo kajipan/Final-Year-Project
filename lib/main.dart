@@ -1551,7 +1551,7 @@ void _sendRequest(int mechanicId, String mechanicName) {
         ),
       ),
       bottomNavigationBar: Container(
-     s   padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(16),
         color: Colors.white,
         child: ElevatedButton.icon(
           onPressed: () {
